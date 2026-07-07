@@ -1,0 +1,153 @@
+{
+  "name": "论文阅读记录",
+  "table_name": "阅读记录",
+  "description": "统一记录每篇论文精读后的核心元数据、关键词、Insight 和飞书文档链接",
+  "fields": [
+    {
+      "type": "text",
+      "name": "论文标题",
+      "description": "论文英文标题"
+    },
+    {
+      "type": "text",
+      "name": "作者",
+      "description": "作者列表，逗号分隔"
+    },
+    {
+      "type": "text",
+      "name": "发表信息",
+      "description": "如 NeurIPS 2024 / arXiv:2401.12345"
+    },
+    {
+      "type": "text",
+      "name": "Key Topics / 论文关键词",
+      "description": "核心话题关键词，逗号分隔；用于按方向检索（如 articulated objects, part mobility analysis, multi-view segmentation）"
+    },
+    {
+      "type": "datetime",
+      "name": "阅读日期",
+      "style": {
+        "format": "yyyy-MM-dd HH:mm"
+      }
+    },
+    {
+      "type": "text",
+      "name": "飞书文档",
+      "style": {
+        "type": "url"
+      },
+      "description": "导入后的 docx 链接"
+    },
+    {
+      "type": "text",
+      "name": "一句话 Insight",
+      "description": "对该论文最核心的判断（不是摘要）"
+    },
+    {
+      "type": "text",
+      "name": "认知启示",
+      "description": "技术迁移 / 业界应用 / 二阶思考 / 可延伸 idea 的浓缩摘要"
+    },
+    {
+      "type": "text",
+      "name": "核心方法",
+      "description": "一句话概括方法"
+    },
+    {
+      "type": "text",
+      "name": "主要结论",
+      "description": "一句话概括实验结论"
+    },
+    {
+      "type": "text",
+      "name": "创新点",
+      "description": "逐条摘要，换行分隔"
+    },
+    {
+      "type": "text",
+      "name": "局限性",
+      "description": "逐条摘要，换行分隔"
+    },
+    {
+      "type": "select",
+      "name": "复现难度",
+      "multiple": false,
+      "options": [
+        {
+          "name": "高",
+          "hue": "Red",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "中",
+          "hue": "Orange",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "低",
+          "hue": "Green",
+          "lightness": "Lighter"
+        }
+      ]
+    },
+    {
+      "type": "select",
+      "name": "阅读状态",
+      "multiple": false,
+      "options": [
+        {
+          "name": "已精读",
+          "hue": "Green",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "速读",
+          "hue": "Blue",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "待读",
+          "hue": "Gray",
+          "lightness": "Lighter"
+        }
+      ]
+    },
+    {
+      "type": "select",
+      "name": "标签",
+      "multiple": true,
+      "options": [
+        {
+          "name": "必读",
+          "hue": "Red",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "可复现",
+          "hue": "Green",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "有代码",
+          "hue": "Blue",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "可借鉴",
+          "hue": "Turquoise",
+          "lightness": "Lighter"
+        },
+        {
+          "name": "存疑",
+          "hue": "Orange",
+          "lightness": "Lighter"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "name": "本地报告路径",
+      "description": "Markdown 报告本地绝对路径"
+    }
+  ]
+}

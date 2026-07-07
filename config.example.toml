@@ -1,0 +1,24 @@
+[feishu]
+# 目标 Drive 文件夹 token；空字符串表示"我的空间"根目录
+folder_token = "DviafuRlll7FvGdz1a3c36Mhnzh"
+
+# 论文阅读记录 Base token
+base_token = "Basexxxxxx"
+
+# 数据表 ID 或表名；首次运行前可用 lark-cli base +table-list 查询
+table_id = "tblxxxxxxxx"
+
+[report]
+# 报告默认语言：zh | en
+language = "zh"
+
+# 本地报告命名规范（示例）
+filename_pattern = "【{venue}‘{year}】{short_title}.md"
+
+[figure]
+# 本地图片最大宽度（像素），供脚本在导入前缩放
+max_width = 1200
+# 图片质量（仅对 JPG/WebP 生效）
+quality = 90
+# pdffigures2 jar 路径（精确裁图，推荐）。留空或不存在时 extract_figures.py 自动退回 PyMuPDF 裁剪
+pdffigures2_jar = ""

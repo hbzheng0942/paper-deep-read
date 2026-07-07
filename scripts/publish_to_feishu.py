@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""把 Markdown 精读报告同步到飞书：嵌入截图，导入为 docx + 写入 Base 阅读记录。
+
+工作流：
+ 1. 上传 figures/ 目录中的图片到飞书 Drive
+ 2. 替换 Markdown 中的本地图片路径为飞书 URL
+ 3. 将替换后的 Markdown 导入为飞书 docx
+ 4. 在 Base 中写入/更新阅读记录
+
+文档按 `{日期}_{发表地}_{年份}_{短标题}` 命名归档到 config.toml 中 folder_token
+对应的飞书云盘目录下。
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+try:
+   import tomllib
+except ModuleNotFoundError:
+   import tomli as tomllib
+
+from extract_paper_meta import parse_report
+import shutil
+
+
+def load_config(path: Path) -> dict[str, Any]:
+   with open(path, "rb") as f:
+       return tomllib.load(f)
+
+
+def run_lark_cli(*args: str) -> dict[str, Any]:
+   """运行 lark-cli 命令并解析 JSON 输出。"""
+   cmd = ["lark-cli", *args]
+   print(f"$ {' '.join(cmd)}", file=sys.stderr)
+   result = subprocess.run(cmd, capture_output=True, text=True)
+   if result.returncode != 0:
+       print(f"lark-cli error: {result.stderr}", file=sys.stderr)
+       raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{result.stderr}")
+   # lark-cli 输出 JSON 在 stderr 中
+   output = result.stderr.strip()
+   try:
+       return json.loads(output)
+   except json.JSONDecodeError:
+       print(f"Non-JSON output: {result.stderr[:200]}", file=sys.stderr)
+       return {"raw": result.stderr}
+
+
+def upload_image(filepath: Path, folder_token: str) -> str | None:
+    """上传单张图片到飞书 Drive，返回 URL。"""
+    try:
+        data = run_lark_cli(
+            "drive", "+upload",
+            "--as", "user",
+            "--file", str(filepath),
+            "--folder-token", folder_token,
+            "--format", "json",
+        )
+        url = data.get("data", {}).get("url")
+        if not url:
+            url = data.get("url")
+        if url:
+            print(f"  Uploaded {filepath.name} -> {url}", file=sys.stderr)
+            return url
+    except Exception as e:
+        print(f"  WARNING: Failed to upload {filepath.name}: {e}", file=sys.stderr)
+    return None
+
+
+def embed_figures(report_text: str, figures_dir: Path, folder_token: str) -> str:
+    """替换 Markdown 中的本地图片引用为飞书 URL。"""
+    if not figures_dir or not figures_dir.exists():
+        return report_text
+
+    image_files = sorted(figures_dir.glob("*.png")) + sorted(figures_dir.glob("*.jpg"))
+    image_files += sorted(figures_dir.glob("*.jpeg")) + sorted(figures_dir.glob("*.gif"))
+
+    for img_path in image_files:
+        url = upload_image(img_path, folder_token)
+        if url:
+            # 替换 ![alt](figures/xxx.png) 和 ![alt](xxx.png)
+            name = img_path.name
+            # 支持多种引用格式
+            patterns = [
+                rf'!\[([^\]]*)\]\(figures/{re.escape(name)}\)',
+                rf'!\[([^\]]*)\]\(\./figures/{re.escape(name)}\)',
+                rf'!\[([^\]]*)\]\({re.escape(name)}\)',
+            ]
+            for pat in patterns:
+                report_text = re.sub(pat, rf'![]({url})', report_text)
+
+    return report_text
+
+
+def import_markdown_to_docx(report_path: Path, folder_token: str, name: str) -> dict[str, Any]:
+   """调用 lark-cli drive +import 把 Markdown 导入为 docx。"""
+   args = [
+       "drive", "+import",
+       "--as", "user",
+       "--file", str(report_path),
+       "--type", "docx",
+       "--name", name,
+       "--folder-token", folder_token,
+       "--format", "json",
+   ]
+
+   data = run_lark_cli(*args)
+
+   if not data.get("ready") and data.get("timed_out"):
+       ticket = data.get("ticket")
+       if ticket:
+           print(f"Import still running, polling ticket {ticket}...", file=sys.stderr)
+           data = run_lark_cli(
+               "drive", "+task_result",
+               "--scenario", "import",
+               "--ticket", ticket,
+               "--format", "json",
+           )
+
+   return data
+
+
+def build_docx_name(meta: dict[str, Any]) -> str:
+    """构造带日期的 docx 文件名：{日期}_{发表地}_{年份}_{短标题}"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    venue = (meta.get("发表信息", "") or "").split(" ")[0] if meta.get("发表信息") else ""
+    year = meta.get("年份", "")
+    short_title = meta.get("短标题", "") or meta.get("论文标题", "") or "untitled"
+    if len(short_title) > 60:
+        short_title = short_title[:57] + "..."
+    parts = [today]
+    if venue:
+        parts.append(venue)
+    if year:
+        parts.append(str(year))
+    parts.append(short_title)
+    name = "_".join(parts)
+    return sanitize_docx_name(f"论文精读：{name}")
+
+
+def build_base_record(meta: dict[str, Any], doc_url: str | None, key_topics_str: str = "") -> dict[str, Any]:
+   """构造 Base 记录 payload。Key Topics 从 CLI --key-topics 传入。"""
+   key_topics = key_topics_str or meta.get("Key Topics", "") or meta.get("核心话题标签", "") or meta.get("核心话题关键词", "")
+   if isinstance(key_topics, list):
+       key_topics = ", ".join(key_topics)
+
+   record = {
+       "论文标题": meta.get("论文标题", ""),
+       "作者": meta.get("作者", ""),
+       "发表信息": meta.get("发表信息", ""),
+       "Key Topics": key_topics,
+       "阅读日期": datetime.now().strftime("%Y-%m-%d %H:%M"),
+       "一句话 Insight": meta.get("一句话 Insight", ""),
+       "认知启示": meta.get("认知启示", ""),
+       "核心方法": meta.get("核心方法", ""),
+       "主要结论": meta.get("主要结论", ""),
+       "创新点": meta.get("创新点", ""),
+       "局限性": meta.get("局限性", ""),
+       "复现难度": "中",
+       "阅读状态": "已精读",
+       "本地报告路径": meta.get("本地报告路径", ""),
+   }
+   if doc_url:
+       record["飞书文档"] = doc_url
+
+   code_or_link = meta.get("代码", "") or meta.get("代码 / 数据", "") or ""
+   status_tags = []
+   if code_or_link and code_or_link.lower() not in ("unknown", "n/a"):
+       status_tags.append("有代码")
+   status_tags.append("可借鉴")
+   if status_tags:
+       record["标签"] = status_tags
+   return record
+
+
+def write_base_record(base_token: str, table_id: str, record: dict[str, Any]) -> dict[str, Any]:
+   payload = json.dumps(record, ensure_ascii=False)
+   return run_lark_cli(
+       "base", "+record-upsert",
+       "--base-token", base_token,
+       "--table-id", table_id,
+       "--json", payload,
+       "--as", "user",
+       "--format", "json",
+   )
+
+
+def sanitize_docx_name(name: str) -> str:
+   return re.sub(r'[\\/:*?"<>|]+', "_", name).strip() or "论文精读报告"
+
+
+def main():
+   parser = argparse.ArgumentParser(description="Publish a Markdown paper-reading report to Feishu.")
+   parser.add_argument("--config", required=True, type=Path, help="Path to config.toml.")
+   parser.add_argument("--report", required=True, type=Path, help="Path to the Markdown report.")
+   parser.add_argument("--figures", type=Path, default=None, help="Directory containing figure images (will be embedded).")
+   parser.add_argument("--key-topics", type=str, default="",
+                       help="Comma-separated key topic keywords (e.g. 'articulated objects, part mobility analysis').")
+   parser.add_argument("--dry-run", action="store_true", help="Print actions without executing.")
+   args = parser.parse_args()
+
+   config = load_config(args.config)
+   feishu_cfg = config.get("feishu", {})
+   folder_token = feishu_cfg.get("folder_token", "")
+   base_token = feishu_cfg.get("base_token", "")
+   table_id = feishu_cfg.get("table_id", "")
+
+   if not base_token or not table_id:
+       print("ERROR: base_token and table_id must be set in config.toml", file=sys.stderr)
+       sys.exit(1)
+
+   meta = parse_report(args.report)
+   
+   # Key Topics from CLI argument (these go into Base, not report markdown)
+   key_topics_str = args.key_topics
+   if not key_topics_str and args.figures:
+       key_topics_str = meta.get("Key Topics", "") or ""
+   docx_name = build_docx_name(meta)
+   doc_url: str | None = None
+
+   # Read report text
+   report_text = args.report.read_text(encoding="utf-8")
+
+   # Embed figures if provided
+   if args.figures and args.figures.exists():
+       if args.dry_run:
+           png_count = len(list(args.figures.glob("*.png")))
+           print(f"[DRY-RUN] Would upload {png_count} images from {args.figures}", file=sys.stderr)
+       else:
+           report_text = embed_figures(report_text, args.figures, folder_token)
+
+   # Write temp markdown with embedded image URLs
+   with tempfile.NamedTemporaryFile(mode='w', suffix='.md', encoding='utf-8', delete=False) as tmp:
+       tmp.write(report_text)
+       tmp_path = Path(tmp.name)
+
+   try:
+       if args.dry_run:
+           print(f"[DRY-RUN] Would import report as docx named '{docx_name}'", file=sys.stderr)
+           if folder_token:
+               print(f"[DRY-RUN]   into folder '{folder_token}'", file=sys.stderr)
+       else:
+           # lark-cli drive +import requires a relative path; copy to cwd
+           local_md = Path(tmp_path.name)  # relative path for lark-cli
+           shutil.copy2(str(tmp_path), str(local_md))
+           import_result = import_markdown_to_docx(local_md, folder_token, docx_name)
+           local_md.unlink(missing_ok=True)
+           print(json.dumps(import_result, ensure_ascii=False, indent=2), file=sys.stderr)
+           doc_url = import_result.get("url")
+           if not doc_url:
+               doc_url = import_result.get("data", {}).get("url") or import_result.get("result", {}).get("url")
+           if not doc_url:
+               # Try to construct from token
+               token = import_result.get("data", {}).get("token") or import_result.get("result", {}).get("token")
+               if token:
+                   doc_url = f"https://my.feishu.cn/drive/file/{token}"
+   finally:
+       tmp_path.unlink(missing_ok=True)
+
+   record = build_base_record(meta, doc_url, key_topics_str)
+   if args.dry_run:
+       print(f"[DRY-RUN] Would write Base record:", file=sys.stderr)
+       print(json.dumps(record, ensure_ascii=False, indent=2))
+   else:
+       base_result = write_base_record(base_token, table_id, record)
+       print("Base record written:", json.dumps(base_result, ensure_ascii=False, indent=2))
+
+   output = {
+       "report_path": str(args.report.resolve()),
+       "docx_name": docx_name,
+       "docx_url": doc_url,
+       "base_record": record if args.dry_run else base_result.get("record", {}),
+   }
+   print(json.dumps(output, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+   main()

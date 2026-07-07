@@ -1,0 +1,7 @@
+# Python dependencies for the paper-reading workflow
+pymupdf>=1.24.0
+markdown>=3.6
+requests>=2.31.0
+tomli>=2.0.0 ; python_version < "3.11"
+# 供 generate_report.py 调用 OpenAI-compatible Chat API 生成报告
+openai>=1.30.0
