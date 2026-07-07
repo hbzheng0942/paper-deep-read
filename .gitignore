@@ -1,6 +1,19 @@
-config.toml
-reports/
+.DS_Store
 __pycache__/
 *.pyc
 .venv/
-tmphk9_7_tb.md
+.python-version
+
+# Local-only configuration
+config.toml
+
+# Local agent/editor metadata
+.claude/
+.codex/
+
+# Generated paper artifacts
+reports/
+
+# Temporary files
+*.log
+*.tmp

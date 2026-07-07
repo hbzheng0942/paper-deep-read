@@ -27,7 +27,6 @@ except ModuleNotFoundError:
    import tomli as tomllib
 
 from extract_paper_meta import parse_report
-import shutil
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -93,7 +92,7 @@ def embed_figures(report_text: str, figures_dir: Path, folder_token: str) -> str
                 rf'!\[([^\]]*)\]\({re.escape(name)}\)',
             ]
             for pat in patterns:
-                report_text = re.sub(pat, rf'![]({url})', report_text)
+                report_text = re.sub(pat, lambda m: f"![{m.group(1)}]({url})", report_text)
 
     return report_text
 
@@ -154,7 +153,7 @@ def build_base_record(meta: dict[str, Any], doc_url: str | None, key_topics_str:
        "论文标题": meta.get("论文标题", ""),
        "作者": meta.get("作者", ""),
        "发表信息": meta.get("发表信息", ""),
-       "Key Topics": key_topics,
+       "Key Topics / 论文关键词": key_topics,
        "阅读日期": datetime.now().strftime("%Y-%m-%d %H:%M"),
        "一句话 Insight": meta.get("一句话 Insight", ""),
        "认知启示": meta.get("认知启示", ""),
@@ -246,11 +245,7 @@ def main():
            if folder_token:
                print(f"[DRY-RUN]   into folder '{folder_token}'", file=sys.stderr)
        else:
-           # lark-cli drive +import requires a relative path; copy to cwd
-           local_md = Path(tmp_path.name)  # relative path for lark-cli
-           shutil.copy2(str(tmp_path), str(local_md))
-           import_result = import_markdown_to_docx(local_md, folder_token, docx_name)
-           local_md.unlink(missing_ok=True)
+           import_result = import_markdown_to_docx(tmp_path, folder_token, docx_name)
            print(json.dumps(import_result, ensure_ascii=False, indent=2), file=sys.stderr)
            doc_url = import_result.get("url")
            if not doc_url:

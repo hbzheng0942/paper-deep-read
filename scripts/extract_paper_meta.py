@@ -158,8 +158,14 @@ def extract_venue_year(text: str) -> tuple[str, str]:
 
 
 def extract_topic_tags(text: str) -> list[str]:
-    """从基本信息表格提取核心话题标签。支持逗号/斜杠/竖线分隔。"""
-    tags_str = extract_table_field(text, "核心话题标签")
+    """从基本信息表格提取关键词。支持中英文新旧字段名。"""
+    tags_str = extract_table_field(text, "Key Topics / 论文关键词")
+    if not tags_str:
+        tags_str = extract_table_field(text, "Key Topics")
+    if not tags_str:
+        tags_str = extract_table_field(text, "论文关键词")
+    if not tags_str:
+        tags_str = extract_table_field(text, "核心话题标签")
     if not tags_str:
         tags_str = extract_table_field(text, "话题类型")
     if not tags_str:
@@ -178,6 +184,7 @@ def parse_report(path: Path) -> dict[str, Any]:
        "论文标题": extract_table_field(text, "标题"),
        "作者": extract_table_field(text, "作者"),
        "发表信息": extract_table_field(text, "发表信息"),
+       "Key Topics": ", ".join(extract_topic_tags(text)),
        "论文话题类型": extract_topic_type(text),
        "一句话 Insight": extract_one_sentence_insight(text),
        "认知启示": extract_enlightenment(text),
@@ -187,6 +194,7 @@ def parse_report(path: Path) -> dict[str, Any]:
        "局限性": "\n".join(f"{i+1}. {item}" for i, item in enumerate(limitations)) if limitations else "",
        "Venue": venue,
        "Year": year,
+       "年份": year,
        "本地报告路径": str(path.resolve()),
    }
 

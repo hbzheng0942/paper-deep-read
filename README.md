@@ -38,7 +38,7 @@ PDF / arXiv URL / 标题
 paper-reading-workflow/
 ├── README.md                        # 本文件
 ├── SKILL.md                         # Skill 入口：给 Agent 的执行步骤
-├── config.example.toml              # 飞书 token / folder / Base / LLM 配置示例
+├── config.example.toml              # 飞书 token / folder / Base 配置示例
 ├── requirements.txt                 # Python 依赖
 ├── templates/
 │   ├── report_template.md           # 一屏卡片 + WHAT/WHY/HOW/EXPERIMENT + 认知启示 模板
@@ -46,7 +46,7 @@ paper-reading-workflow/
 │   └── base_schema.json             # 论文阅读记录 Base 字段 schema
 ├── scripts/
 │   ├── extract_figures.py           # 精确裁剪 figure/table（pdffigures2 / PyMuPDF）
-│   ├── generate_report.py           # PDF → 分阶段生成 Markdown 精读报告（LLM）
+│   ├── generate_report.py           # PDF → 提取全文与图表清单，供 Agent 精读
 │   ├── extract_paper_meta.py        # 从 report.md 提取元数据（含认知启示）
 │   ├── publish_to_feishu.py         # Markdown → 飞书 docx + Base 记录
 │   └── setup_base.py                # 一键创建/初始化阅读记录 Base（可选）
@@ -205,7 +205,8 @@ requests
 
 脚本会：
 
-- 解析 `report.md` 提取标题、作者、venue、年份、topic、insight 等字段。
+- 解析 `report.md` 提取标题、作者、venue、年份、insight 等字段。
+- 上传 `figures/` 中的图片到飞书 Drive，并把本地图片路径替换成飞书 URL。
 - 调用 `lark-cli drive +import --type docx` 把 Markdown 导入成飞书文档。
 - 调用 `lark-cli base +record-upsert` 在阅读记录 Base 中新增一行。
 
@@ -220,20 +221,24 @@ mkdir -p papers && mv paper.pdf papers/
 python scripts/extract_figures.py \
   --pdf papers/paper.pdf --output reports/paper-slug --config config.toml
 
-# 3. 分阶段生成报告（复用第 2 步的 figure_manifest.json；需 OPENAI_API_KEY）
-#    默认按 WHAT/WHY → HOW → EXPERIMENT → 创新/局限/背景/复现 → 认知启示 → 一屏卡片 分阶段生成再拼装
+# 3. 提取全文素材，供 Agent 按模板精读
 python scripts/generate_report.py \
-  --pdf papers/paper.pdf --output reports/paper-slug --config config.toml
-#    单次生成（短论文/省 token）：加 --single-shot
-#    或让 Codex / Claude Code 读 templates/report_template.md + extracted_text.txt 亲自逐段写
+  --pdf papers/paper.pdf --output reports/paper-slug --extract-only
 
-# 4. 验证报告（对照 report.md 第 11 节完整性自检表：卡片可独立读懂、认知启示具体可行动、图表已嵌入）
+# 4. 让 Claude / Codex 读取以下内容后亲自撰写 report.md
+#    - templates/report_template.md
+#    - templates/evidence_card_template.md
+#    - reports/paper-slug/extracted_text.txt
+#    - reports/paper-slug/figure_manifest.json
 
-# 5. 同步到飞书
+# 5. 验证报告（对照 report.md 第 11 节完整性自检表：卡片可独立读懂、认知启示具体可行动、图表已嵌入）
+
+# 6. 同步到飞书
 python scripts/publish_to_feishu.py \
   --config config.toml \
   --report reports/paper-slug/report.md \
-  --figures reports/paper-slug/figures
+  --figures reports/paper-slug/figures \
+  --key-topics "articulated objects, part mobility analysis"
 ```
 
 > 作为 Skill 使用时，上述步骤已固化在 [SKILL.md](SKILL.md)，Agent 会自动串起「裁图 → 生成 → 自检 → 同步」。
@@ -247,7 +252,7 @@ python scripts/publish_to_feishu.py \
 | 论文标题 | text | 英文标题 |
 | 作者 | text | 作者列表 |
 | 发表信息 | text | `Venue Year` 或 `arXiv:xxxx` |
-| 论文话题类型 | select | 如：LLM / Agent / RAG / CV / NLP / System / Theory |
+| Key Topics / 论文关键词 | text | 2-4 个细分方向词，逗号分隔，便于按话题检索 |
 | 阅读日期 | datetime | 本次精读完成时间 |
 | 飞书文档 | url | 导入后的 docx 链接 |
 | 一句话 Insight | text | 对该论文最核心的判断（取自一屏卡片的「核心洞见」） |
@@ -275,8 +280,8 @@ table_id = "tblxxxxxxxx"
 [report]
 # 默认报告语言
 language = "zh"
-# 图片最大宽度（飞书 docx 用）
-image_max_width = 800
+# 本地报告命名模式
+filename_pattern = "【{venue}‘{year}】{short_title}.md"
 ```
 
 ## 进阶：叠加 Evidence Traceability
@@ -292,25 +297,14 @@ image_max_width = 800
 
 本工作流默认不强制生成 traceability bundle，但模板中的 evidence marker 已经兼容该扩展。
 
-## 进阶：批量处理多篇论文
-
-```bash
-python scripts/batch_publish.py \
-  --config config.toml \
-  --reports-dir reports/ \
-  --max-workers 2
-```
-
-批量脚本会串行写入 Base（避免 1254291 并发冲突），并对每篇报告执行 `drive +import`。
-
 ## 常见问题
 
 ### 1. `drive +import` 导入后图片丢失
 
-当前版本 `publish_to_feishu.py` 尚未自动上传本地相对路径图片。飞书 `drive +import` 导入 Markdown 时，本地图片通常不会随文档一起导入。建议：
-- 在本地 Markdown 中保留完整带图版本；
-- 或先把图片上传到图床 / 可公开访问的 URL，再在 Markdown 中使用网络图片链接；
-- 后续可扩展为自动上传图片到 Drive 并替换链接。
+当前版本会先上传 `figures/` 目录中的图片到飞书 Drive，再把 Markdown 里的本地图片路径替换成飞书 URL，然后导入 docx。若图片仍缺失，通常是以下原因：
+- `--figures` 目录未传，或目录内文件名与 Markdown 引用不一致。
+- `lark-cli drive +upload` 没有用户态权限。
+- Markdown 中使用了脚本当前未覆盖的图片路径格式。
 
 ### 2. Base 字段名和脚本里的不一致
 
