@@ -44,85 +44,180 @@ def run_lark_cli(*args: str) -> dict[str, Any]:
        raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{result.stderr}")
    # lark-cli 输出 JSON 在 stderr 中
    output = result.stderr.strip()
+   # upload 命令第一行是进度信息，JSON 在最后一行
+   for line in reversed(output.splitlines()):
+       try:
+           return json.loads(line)
+       except json.JSONDecodeError:
+           continue
+   print(f"Non-JSON output: {result.stderr[:200]}", file=sys.stderr)
+   return {"raw": result.stderr}
+
+
+def create_docx_and_insert_images(
+    report_path: Path, name: str, figures_dir: Path | None = None, folder_token: str = ""
+) -> dict[str, Any]:
+   """用 docs +create 建原生 docx，再用 +media-insert 插入图片。
+
+   drive +import --type docx 不支持嵌入远程图片，改用 docs +create 原生 docx。
+   图片通过 docs +media-insert 从本地文件上传为文档内嵌媒体。
+   """
+   import os as _os
+
+   # 1) 读取 markdown，找到所有本地图片引用，替换为文字占位符
+   text = report_path.read_text(encoding="utf-8")
+   figures = []
+   def _replace_img(m):
+       alt, path = m.group(1), m.group(2)
+       if path.startswith("figures/") or path.startswith("./figures/"):
+           basename = path.replace("./figures/", "").replace("figures/", "")
+           figures.append({"alt": alt, "basename": basename})
+           return f"[图：{alt}]"
+       return m.group(0)
+   text_no_img = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _replace_img, text)
+
+   # Write temp file for @file content (large content exceeds arg limit)
+   tmp_md = report_path.parent / '_tmp_no_img.md'
+   tmp_md.write_text(text_no_img, encoding="utf-8")
+
+   # 2) docs +create 建原生 docx（指定目标文件夹）
+   create_args = ["lark-cli", "docs", "+create", "--as", "user",
+        "--title", name, "--content", f"@{tmp_md}", "--format", "json"]
+   if folder_token:
+       create_args += ["--parent-token", folder_token]
+   result = subprocess.run(
+       create_args,
+       capture_output=True, text=True,
+   )
+   tmp_md.unlink(missing_ok=True)
+   output = (result.stderr + result.stdout).strip()
+   data = {}
+   # Try parsing entire output first (multi-line JSON when using @file),
+   # then fall back to line-by-line (single-line JSON from CLI direct)
    try:
-       return json.loads(output)
+       data = json.loads(output)
    except json.JSONDecodeError:
-       print(f"Non-JSON output: {result.stderr[:200]}", file=sys.stderr)
-       return {"raw": result.stderr}
+       for line in reversed(output.splitlines()):
+           if not line.strip():
+               continue
+           try:
+               data = json.loads(line)
+               break
+           except json.JSONDecodeError:
+               continue
+   if not data.get("ok"):
+       print(f"docs +create failed: {result.stderr[:500]}", file=sys.stderr)
+       return {"ok": False, "error": result.stderr[:500]}
 
+   doc = data.get("data", {}).get("document", {})
+   doc_url = doc.get("url", "")
+   doc_id = doc.get("document_id", "")
+   if not doc_id:
+       print(f"docs +create returned no document_id", file=sys.stderr)
+       return {"ok": False, "error": "no document_id"}
 
-def upload_image(filepath: Path, folder_token: str) -> str | None:
-    """上传单张图片到飞书 Drive，返回 URL。"""
-    try:
-        data = run_lark_cli(
-            "drive", "+upload",
-            "--as", "user",
-            "--file", str(filepath),
-            "--folder-token", folder_token,
-            "--format", "json",
-        )
-        url = data.get("data", {}).get("url")
-        if not url:
-            url = data.get("url")
-        if url:
-            print(f"  Uploaded {filepath.name} -> {url}", file=sys.stderr)
-            return url
-    except Exception as e:
-        print(f"  WARNING: Failed to upload {filepath.name}: {e}", file=sys.stderr)
-    return None
+   print(f"  Created docx: {doc_url}", file=sys.stderr)
 
+   # 3) 插入图片
+   if figures_dir and figures_dir.exists() and figures:
+       print(f"  Inserting {len(figures)} images...", file=sys.stderr)
+       cwd = _os.getcwd()
+       for fg in figures:
+           img_path = figures_dir / fg["basename"]
+           if not img_path.exists():
+               print(f"    SKIP {fg['basename']}: file not found", file=sys.stderr)
+               continue
+           caption = fg["alt"][:100]
+           _os.chdir(str(figures_dir))
+           try:
+               result2 = subprocess.run(
+                   ["lark-cli", "docs", "+media-insert", "--as", "user",
+                    "--doc", doc_url, "--file", fg["basename"],
+                    "--caption", caption, "--align", "center", "--format", "json"],
+                   capture_output=True, text=True,
+               )
+               out2 = (result2.stderr + result2.stdout).strip()
+               try:
+                   json.loads(out2)
+               except json.JSONDecodeError:
+                   for line2 in reversed(out2.splitlines()):
+                       if not line2.strip():
+                           continue
+                       try:
+                           json.loads(line2)
+                           break
+                       except json.JSONDecodeError:
+                           continue
+               # Capture block_id for repositioning
+               for line2 in reversed(out2.splitlines()):
+                   if not line2.strip():
+                       continue
+                   try:
+                       d2 = json.loads(line2)
+                       if d2.get("ok"):
+                           fg["img_block_id"] = d2.get("data", {}).get("block_id", "")
+                       break
+                   except json.JSONDecodeError:
+                       continue
+               print(f"    OK  {fg['basename']}", file=sys.stderr)
+           except Exception as e:
+               print(f"    FAIL {fg['basename']}: {e}", file=sys.stderr)
+           finally:
+               _os.chdir(cwd)
 
-def embed_figures(report_text: str, figures_dir: Path, folder_token: str) -> str:
-    """替换 Markdown 中的本地图片引用为飞书 URL。"""
-    if not figures_dir or not figures_dir.exists():
-        return report_text
+   # 4) Reposition images: move each image after its sentinel text block
+   if figures and figures_dir and figures_dir.exists():
+       print(f"  Repositioning images...", file=sys.stderr)
+       # Fetch document content as XML (default format) with IDs
+       result3 = subprocess.run(
+           ["lark-cli", "docs", "+fetch", "--as", "user",
+            "--doc", doc_url, "--detail", "with-ids", "--format", "json"],
+           capture_output=True, text=True,
+       )
+       out3 = (result3.stderr + result3.stdout).strip()
+       try:
+           tree = json.loads(out3)
+       except json.JSONDecodeError:
+           tree = {}
+       xml_content = tree.get("data", {}).get("document", {}).get("content", "")
 
-    image_files = sorted(figures_dir.glob("*.png")) + sorted(figures_dir.glob("*.jpg"))
-    image_files += sorted(figures_dir.glob("*.jpeg")) + sorted(figures_dir.glob("*.gif"))
+       # Extract sentinel block IDs (the <p> blocks containing [图：)
+       sentinel_ids = []
+       for match in re.finditer(r'<p\s+id="([^"]+)"[^>]*>\s*\[图：([^\]]*)\]\s*</p>', xml_content):
+           sentinel_ids.append(match.group(1))
+       
+       # Extract image block IDs (in order they appear)
+       img_ids = []
+       for match in re.finditer(r'<img\s+id="([^"]+)"', xml_content):
+           img_ids.append(match.group(1))
 
-    for img_path in image_files:
-        url = upload_image(img_path, folder_token)
-        if url:
-            # 替换 ![alt](figures/xxx.png) 和 ![alt](xxx.png)
-            name = img_path.name
-            # 支持多种引用格式
-            patterns = [
-                rf'!\[([^\]]*)\]\(figures/{re.escape(name)}\)',
-                rf'!\[([^\]]*)\]\(\./figures/{re.escape(name)}\)',
-                rf'!\[([^\]]*)\]\({re.escape(name)}\)',
-            ]
-            for pat in patterns:
-                report_text = re.sub(pat, lambda m: f"![{m.group(1)}]({url})", report_text)
+       print(f"  Found {len(sentinel_ids)} sentinels, {len(img_ids)} images", file=sys.stderr)
 
-    return report_text
-
-
-def import_markdown_to_docx(report_path: Path, folder_token: str, name: str) -> dict[str, Any]:
-   """调用 lark-cli drive +import 把 Markdown 导入为 docx。"""
-   args = [
-       "drive", "+import",
-       "--as", "user",
-       "--file", str(report_path),
-       "--type", "docx",
-       "--name", name,
-       "--folder-token", folder_token,
-       "--format", "json",
-   ]
-
-   data = run_lark_cli(*args)
-
-   if not data.get("ready") and data.get("timed_out"):
-       ticket = data.get("ticket")
-       if ticket:
-           print(f"Import still running, polling ticket {ticket}...", file=sys.stderr)
-           data = run_lark_cli(
-               "drive", "+task_result",
-               "--scenario", "import",
-               "--ticket", ticket,
-               "--format", "json",
+       # Move images and delete sentinels
+       moved = 0
+       for i in range(min(len(sentinel_ids), len(img_ids))):
+           s_id = sentinel_ids[i]
+           img_id = img_ids[i]
+           basename = figures[i]["basename"] if i < len(figures) else "?"
+           
+           subprocess.run(
+               ["lark-cli", "docs", "+update", "--as", "user",
+                "--doc", doc_url, "--command", "block_move_after",
+                "--block-id", s_id, "--src-block-ids", img_id, "--format", "json"],
+               capture_output=True, text=True,
            )
+           subprocess.run(
+               ["lark-cli", "docs", "+update", "--as", "user",
+                "--doc", doc_url, "--command", "block_delete",
+                "--block-id", s_id, "--format", "json"],
+               capture_output=True, text=True,
+           )
+           moved += 1
+           print(f"    {basename} -> after {s_id}", file=sys.stderr)
+       
+       print(f"  Repositioned {moved}/{len(figures)} images", file=sys.stderr)
 
-   return data
+   return {"ok": True, "url": doc_url, "data": {"url": doc_url, "token": doc_id, "type": "docx"}}
 
 
 def build_docx_name(meta: dict[str, Any]) -> str:
@@ -153,7 +248,7 @@ def build_base_record(meta: dict[str, Any], doc_url: str | None, key_topics_str:
        "论文标题": meta.get("论文标题", ""),
        "作者": meta.get("作者", ""),
        "发表信息": meta.get("发表信息", ""),
-       "Key Topics / 论文关键词": key_topics,
+       "Key Topics": key_topics,
        "阅读日期": datetime.now().strftime("%Y-%m-%d %H:%M"),
        "一句话 Insight": meta.get("一句话 Insight", ""),
        "认知启示": meta.get("认知启示", ""),
@@ -226,37 +321,24 @@ def main():
    # Read report text
    report_text = args.report.read_text(encoding="utf-8")
 
-   # Embed figures if provided
-   if args.figures and args.figures.exists():
-       if args.dry_run:
-           png_count = len(list(args.figures.glob("*.png")))
-           print(f"[DRY-RUN] Would upload {png_count} images from {args.figures}", file=sys.stderr)
-       else:
-           report_text = embed_figures(report_text, args.figures, folder_token)
-
-   # Write temp markdown with embedded image URLs
-   with tempfile.NamedTemporaryFile(mode='w', suffix='.md', encoding='utf-8', delete=False) as tmp:
-       tmp.write(report_text)
-       tmp_path = Path(tmp.name)
-
-   try:
-       if args.dry_run:
-           print(f"[DRY-RUN] Would import report as docx named '{docx_name}'", file=sys.stderr)
-           if folder_token:
-               print(f"[DRY-RUN]   into folder '{folder_token}'", file=sys.stderr)
-       else:
-           import_result = import_markdown_to_docx(tmp_path, folder_token, docx_name)
-           print(json.dumps(import_result, ensure_ascii=False, indent=2), file=sys.stderr)
-           doc_url = import_result.get("url")
-           if not doc_url:
-               doc_url = import_result.get("data", {}).get("url") or import_result.get("result", {}).get("url")
-           if not doc_url:
-               # Try to construct from token
-               token = import_result.get("data", {}).get("token") or import_result.get("result", {}).get("token")
-               if token:
-                   doc_url = f"https://my.feishu.cn/drive/file/{token}"
-   finally:
-       tmp_path.unlink(missing_ok=True)
+   # Create docx with images (docs +create + +media-insert)
+   if args.dry_run:
+       png_count = len(list(args.figures.glob("*.png"))) if (args.figures and args.figures.exists()) else 0
+       print(f"[DRY-RUN] Would create docx '{docx_name}' with {png_count} images", file=sys.stderr)
+       if folder_token:
+           print(f"[DRY-RUN]   in folder '{folder_token}'", file=sys.stderr)
+   else:
+       import_result = create_docx_and_insert_images(
+           args.report, docx_name, args.figures, folder_token
+       )
+       print(json.dumps(import_result, ensure_ascii=False, indent=2), file=sys.stderr)
+       doc_url = import_result.get("url")
+       if not doc_url:
+           doc_url = import_result.get("data", {}).get("url") or import_result.get("result", {}).get("url")
+       if not doc_url:
+           token = import_result.get("data", {}).get("token") or import_result.get("result", {}).get("token")
+           if token:
+               doc_url = f"https://my.feishu.cn/docx/{token}"
 
    record = build_base_record(meta, doc_url, key_topics_str)
    if args.dry_run:
